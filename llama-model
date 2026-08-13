@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+# llama-model — manage GGUF models and router presets.
+#
+# Usage:
+#   llama-model list                 List models in the local models directory
+#   llama-model pull <repo> [file]   Download GGUF from a Hugging Face repo into
+#                                    the models dir (e.g. ggml-org/gemma-3-4b-it-GGUF)
+#                                    [file] is a filename or glob, default: *Q4_K_M*.gguf
+#   llama-model rm <name>            Delete a model file/directory from the models dir
+#   llama-model presets              List preset sections from models.ini
+#   llama-model edit                 Open models.ini in $EDITOR
+#
+# Config: ~/.config/llama/llama.conf   Presets: ~/.config/llama/models.ini
+
+set -euo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/llama"
+CONFIG_FILE="$CONFIG_DIR/llama.conf"
+[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+MODELS_DIR="${LLAMA_MODELS_DIR:-$HOME/.local/share/llama/models}"
+PRESET_FILE="${LLAMA_PRESET_FILE:-$CONFIG_DIR/models.ini}"
+
+mkdir -p "$MODELS_DIR"
+
+cmd_list() {
+    echo "Models in $MODELS_DIR:"
+    local found=0
+    # top-level .gguf files and subdirectories (multimodal / multi-shard)
+    for f in "$MODELS_DIR"/*; do
+        [ -e "$f" ] || continue
+        found=1
+        local name size
+        name="$(basename "$f")"
+        size="$(du -sh "$f" | cut -f1)"
+        printf '  %-60s %s\n' "$name" "$size"
+    done
+    [ "$found" = 1 ] || echo "  (none — use: llama-model pull <hf-repo>)"
+}
+
+cmd_pull() {
+    local repo="${1:-}"
+    local pattern="${2:-*Q4_K_M*.gguf}"
+    [ -n "$repo" ] || { echo "usage: llama-model pull <hf-repo> [file-or-glob]" >&2; exit 1; }
+    command -v hf >/dev/null || {
+        echo "llama-model: the 'hf' CLI is required (pip install -U huggingface_hub)" >&2; exit 1; }
+
+    echo "Downloading $pattern from $repo ..."
+    hf download "$repo" --include "$pattern" --local-dir "$MODELS_DIR/.staging-$$"
+
+    # flatten: move downloaded .gguf files to the models dir
+    find "$MODELS_DIR/.staging-$$" -name '*.gguf' -exec mv {} "$MODELS_DIR"/ \;
+    rm -rf "$MODELS_DIR/.staging-$$"
+    echo "Done."
+    cmd_list
+}
+
+cmd_rm() {
+    local name="${1:-}"
+    [ -n "$name" ] || { echo "usage: llama-model rm <name>" >&2; exit 1; }
+    local target="$MODELS_DIR/$name"
+    [ -e "$target" ] || { echo "llama-model: no such model: $name" >&2; exit 1; }
+    echo "About to delete: $target ($(du -sh "$target" | cut -f1))"
+    read -r -p "Confirm? [y/N] " ans
+    [ "$ans" = y ] || [ "$ans" = Y ] || { echo "Aborted."; exit 1; }
+    rm -rf "$target"
+    echo "Deleted."
+}
+
+cmd_presets() {
+    [ -f "$PRESET_FILE" ] || { echo "llama-model: no preset file at $PRESET_FILE" >&2; exit 1; }
+    echo "Presets in $PRESET_FILE:"
+    grep -E '^\[.*\]' "$PRESET_FILE" | sed 's/^\[/  /; s/\]$//'
+}
+
+cmd_edit() {
+    exec "${EDITOR:-vi}" "$PRESET_FILE"
+}
+
+case "${1:-}" in
+    list)    cmd_list ;;
+    pull)    shift; cmd_pull "$@" ;;
+    rm)      shift; cmd_rm "$@" ;;
+    presets) cmd_presets ;;
+    edit)    cmd_edit ;;
+    ""|-h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) echo "llama-model: unknown command: $1 (try --help)" >&2; exit 1 ;;
+esac

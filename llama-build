@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+# llama-build — build llama.cpp from source, optimized for macOS / Apple Silicon,
+# and install the binaries into ~/.local.
+#
+# Usage:
+#   llama-build [options]
+#
+# Options:
+#   --src DIR      Path to the llama.cpp git checkout
+#                  (default: $LLAMA_SRC_DIR from config, then ~/Desktop/src/LLAMA-cpp/llama.cpp)
+#   --prefix DIR   Install prefix (default: ~/.local)
+#   --update       git pull the source tree before building
+#   --clean        Remove the build directory first (full rebuild)
+#   -j N           Parallel build jobs (default: number of CPU cores)
+#   -h, --help     Show this help
+
+set -euo pipefail
+
+CONFIG_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/llama/llama.conf"
+[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+SRC_DIR="${LLAMA_SRC_DIR:-$HOME/Desktop/src/LLAMA-cpp/llama.cpp}"
+PREFIX="${LLAMA_PREFIX:-$HOME/.local}"
+JOBS="$(sysctl -n hw.ncpu)"
+DO_UPDATE=0
+DO_CLEAN=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --src)    SRC_DIR="$2"; shift 2 ;;
+        --prefix) PREFIX="$2"; shift 2 ;;
+        --update) DO_UPDATE=1; shift ;;
+        --clean)  DO_CLEAN=1; shift ;;
+        -j)       JOBS="$2"; shift 2 ;;
+        -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "llama-build: unknown option: $1" >&2; exit 1 ;;
+    esac
+done
+
+if [ ! -f "$SRC_DIR/CMakeLists.txt" ]; then
+    echo "llama-build: no llama.cpp source tree at: $SRC_DIR" >&2
+    echo "Set LLAMA_SRC_DIR in $CONFIG_FILE or pass --src DIR" >&2
+    exit 1
+fi
+
+command -v cmake >/dev/null || { echo "llama-build: cmake not found (brew install cmake)" >&2; exit 1; }
+
+BUILD_DIR="$SRC_DIR/build-macos"
+
+if [ "$DO_UPDATE" = 1 ]; then
+    echo "==> Updating source tree"
+    git -C "$SRC_DIR" pull --ff-only
+fi
+
+if [ "$DO_CLEAN" = 1 ] && [ -d "$BUILD_DIR" ]; then
+    echo "==> Cleaning $BUILD_DIR"
+    rm -rf "$BUILD_DIR"
+fi
+
+echo "==> Configuring (prefix: $PREFIX)"
+# Metal, Accelerate, and native CPU tuning (GGML_NATIVE) are all ON by default
+# on Apple platforms; static libs keep the installed binaries self-contained.
+cmake -S "$SRC_DIR" -B "$BUILD_DIR" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX="$PREFIX" \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DGGML_METAL=ON \
+    -DGGML_METAL_EMBED_LIBRARY=ON \
+    -DLLAMA_BUILD_TESTS=OFF \
+    -DLLAMA_BUILD_EXAMPLES=OFF \
+    -DLLAMA_BUILD_SERVER=ON \
+    ${LLAMA_CMAKE_EXTRA:-}
+
+echo "==> Building with $JOBS jobs"
+cmake --build "$BUILD_DIR" --config Release -j "$JOBS"
+
+echo "==> Installing to $PREFIX"
+cmake --install "$BUILD_DIR"
+
+echo
+echo "Done. Installed binaries:"
+ls "$PREFIX/bin" | grep '^llama' | sed 's/^/  /'
+echo
+"$PREFIX/bin/llama-server" --version 2>&1 | head -2

@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# llama-router — run llama-server in router mode (dynamic model loading/unloading).
+#
+# Usage:
+#   llama-router start [-f]   Start the router (-f: foreground; default: background)
+#   llama-router stop         Stop the router
+#   llama-router restart      Restart the router
+#   llama-router status       Show router status and loaded models
+#   llama-router models       List models known to the router
+#   llama-router logs [-f]    Show router log (-f: follow)
+#   llama-router url          Print the OpenAI-compatible base URL
+#
+# Config: ~/.config/llama/llama.conf   Presets: ~/.config/llama/models.ini
+
+set -euo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/llama"
+CONFIG_FILE="$CONFIG_DIR/llama.conf"
+[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+
+HOST="${LLAMA_HOST:-127.0.0.1}"
+PORT="${LLAMA_PORT:-8080}"
+MODELS_DIR="${LLAMA_MODELS_DIR:-$HOME/.local/share/llama/models}"
+PRESET_FILE="${LLAMA_PRESET_FILE:-$CONFIG_DIR/models.ini}"
+MODELS_MAX="${LLAMA_MODELS_MAX:-2}"
+EXTRA_ARGS="${LLAMA_EXTRA_ARGS:-}"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/llama"
+PID_FILE="$STATE_DIR/llama-router.pid"
+LOG_FILE="$STATE_DIR/llama-router.log"
+SERVER_BIN="${LLAMA_SERVER_BIN:-$HOME/.local/bin/llama-server}"
+
+BASE_URL="http://$HOST:$PORT"
+
+mkdir -p "$STATE_DIR" "$MODELS_DIR"
+
+running_pid() {
+    [ -f "$PID_FILE" ] || return 1
+    local pid
+    pid="$(cat "$PID_FILE")"
+    kill -0 "$pid" 2>/dev/null || return 1
+    echo "$pid"
+}
+
+build_args() {
+    ARGS=(--host "$HOST" --port "$PORT" --models-dir "$MODELS_DIR" --models-max "$MODELS_MAX")
+    [ -f "$PRESET_FILE" ] && ARGS+=(--models-preset "$PRESET_FILE")
+    # shellcheck disable=SC2206
+    [ -n "$EXTRA_ARGS" ] && ARGS+=($EXTRA_ARGS)
+}
+
+cmd_start() {
+    local foreground=0
+    [ "${1:-}" = "-f" ] && foreground=1
+
+    if pid="$(running_pid)"; then
+        echo "llama-router: already running (pid $pid) at $BASE_URL"
+        exit 0
+    fi
+    [ -x "$SERVER_BIN" ] || { echo "llama-router: $SERVER_BIN not found — run llama-build first" >&2; exit 1; }
+
+    build_args
+    echo "Starting llama-server in router mode on $BASE_URL"
+    echo "  models dir: $MODELS_DIR"
+    [ -f "$PRESET_FILE" ] && echo "  presets:    $PRESET_FILE"
+
+    if [ "$foreground" = 1 ]; then
+        exec "$SERVER_BIN" "${ARGS[@]}"
+    fi
+
+    nohup "$SERVER_BIN" "${ARGS[@]}" >>"$LOG_FILE" 2>&1 &
+    echo $! > "$PID_FILE"
+
+    # wait for the server to answer
+    for _ in $(seq 1 30); do
+        if curl -fsS -m 2 "$BASE_URL/health" >/dev/null 2>&1; then
+            echo "Router is up (pid $(cat "$PID_FILE")). Log: $LOG_FILE"
+            exit 0
+        fi
+        running_pid >/dev/null || { echo "llama-router: server exited early — check $LOG_FILE" >&2; exit 1; }
+        sleep 1
+    done
+    echo "llama-router: server did not become healthy in 30s — check $LOG_FILE" >&2
+    exit 1
+}
+
+cmd_stop() {
+    if ! pid="$(running_pid)"; then
+        echo "llama-router: not running"
+        rm -f "$PID_FILE"
+        return 0
+    fi
+    echo "Stopping llama-router (pid $pid)"
+    kill "$pid"
+    for _ in $(seq 1 15); do
+        kill -0 "$pid" 2>/dev/null || { rm -f "$PID_FILE"; echo "Stopped."; return 0; }
+        sleep 1
+    done
+    echo "Still running, sending SIGKILL"
+    kill -9 "$pid" 2>/dev/null || true
+    rm -f "$PID_FILE"
+}
+
+cmd_status() {
+    if pid="$(running_pid)"; then
+        echo "llama-router: running (pid $pid) at $BASE_URL"
+        echo
+        cmd_models
+    else
+        echo "llama-router: not running"
+    fi
+}
+
+cmd_models() {
+    if ! curl -fsS -m 3 "$BASE_URL/v1/models" 2>/dev/null | python3 -c '
+import json, sys
+data = json.load(sys.stdin).get("data", [])
+if not data:
+    print("No models reported by the router.")
+for m in data:
+    status = m.get("status")
+    if isinstance(status, dict):
+        state = status.get("value", "?")
+    else:
+        state = status or "available"
+    print("  {:50s}  {}".format(m.get("id", "?"), state))
+'; then
+        echo "llama-router: could not query $BASE_URL/v1/models (is the router running?)" >&2
+        exit 1
+    fi
+}
+
+cmd_logs() {
+    [ -f "$LOG_FILE" ] || { echo "llama-router: no log file at $LOG_FILE" >&2; exit 1; }
+    if [ "${1:-}" = "-f" ]; then tail -f "$LOG_FILE"; else tail -n 100 "$LOG_FILE"; fi
+}
+
+case "${1:-}" in
+    start)   shift; cmd_start "$@" ;;
+    stop)    cmd_stop ;;
+    restart) cmd_stop; cmd_start ;;
+    status)  cmd_status ;;
+    models)  cmd_models ;;
+    logs)    shift || true; cmd_logs "$@" ;;
+    url)     echo "$BASE_URL/v1" ;;
+    ""|-h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *) echo "llama-router: unknown command: $1 (try --help)" >&2; exit 1 ;;
+esac

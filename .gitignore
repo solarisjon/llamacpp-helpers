@@ -1,0 +1,5 @@
+# macOS
+.DS_Store
+
+# any local config overrides committed by accident
+*.local.conf
