@@ -43,9 +43,11 @@ running_pid() {
 
 build_args() {
     ARGS=(--host "$HOST" --port "$PORT" --models-dir "$MODELS_DIR" --models-max "$MODELS_MAX")
-    [ -f "$PRESET_FILE" ] && ARGS+=(--models-preset "$PRESET_FILE")
-    # shellcheck disable=SC2206
-    [ -n "$EXTRA_ARGS" ] && ARGS+=($EXTRA_ARGS)
+    if [ -f "$PRESET_FILE" ]; then ARGS+=(--models-preset "$PRESET_FILE"); fi
+    if [ -n "$EXTRA_ARGS" ]; then
+        # shellcheck disable=SC2206
+        ARGS+=($EXTRA_ARGS)
+    fi
 }
 
 cmd_start() {
