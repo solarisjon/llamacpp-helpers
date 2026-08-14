@@ -64,7 +64,11 @@ cmd_start() {
     [ -f "$PRESET_FILE" ] && echo "  presets:    $PRESET_FILE"
 
     if [ "$foreground" = 1 ]; then
-        exec "$SERVER_BIN" "${ARGS[@]}"
+        if ! "$SERVER_BIN" "${ARGS[@]}"; then
+            echo "llama-router: server exited with error (port $PORT already in use?)" >&2
+            exit 1
+        fi
+        exit 0
     fi
 
     nohup "$SERVER_BIN" "${ARGS[@]}" >>"$LOG_FILE" 2>&1 &
